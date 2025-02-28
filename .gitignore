@@ -1,0 +1,27 @@
+# windows:
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Python:
+*.py[cod]
+*.pyc
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+#My configurations:
+db.ini
+deploy_key_rsa
+
+#write by xiewei:
+*.out
+*log
+*.eps
+*.png
+*.vtu
+*.npy
+*.hosts
+*.pdf
