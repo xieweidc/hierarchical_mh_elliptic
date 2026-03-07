@@ -3,11 +3,11 @@ from copy import deepcopy
 import multiprocessing as mp
 from scipy.sparse import csr_matrix
 
-from mesh import RectangleMesh, MHMacroMesh
+from mesh2d import RectangleMesh, MHMacroMesh
 
 
 class MicroPhi:
-    def __init__(self, Omega, nxc, nyc, nxf, nyf, m, nc=None):
+    def __init__(self, Omega, nxc, nyc, nxf, nyf, m, L, nc=None):
         self.Omega = Omega
         self.nxc = nxc
         self.nyc = nyc
@@ -19,21 +19,24 @@ class MicroPhi:
         self.hxc = (Omega[1] - Omega[0]) / self.nxc
         self.hyc = (Omega[3] - Omega[2]) / self.nyc
         
-        self.m = m 
+        self.m = m
+        self.L = L
         self.nc=nc if nc is not None else mp.cpu_count()-2
         
     def get_local_domain(self, xth, yth):
         
         m2 = 2*self.m + 1
-        x = np.arange(4)*self.hxc + self.Omega[0]+(xth*4-self.m)*self.hxc
-        y = np.arange(4)*self.hyc + self.Omega[2]+(yth*4-self.m)*self.hyc
+        x = np.arange(2**(self.L-1))*self.hxc 
+        x += self.Omega[0] + (xth*2**(self.L-1)-self.m)*self.hxc
+        y = np.arange(2**(self.L-1))*self.hyc 
+        y += self.Omega[2] + (yth*2**(self.L-1)-self.m)*self.hyc
         x, y = np.meshgrid(x, y)
         ws = np.c_[x.flat, x.flat+m2*self.hxc, y.flat, y.flat+m2*self.hyc]
         return ws
-    
+        
     def linear_intepolation_quadmesh(self, r):
         # R, (LDC, r*r, LDF)
-        if r == 2:
+        if r == 2: # (4, 4, 4)
             R = np.array([[[1.  , 0.5 , 0.5 , 0.25],
                            [0.5 , 0.  , 0.25, 0.  ],
                            [0.5 , 0.25, 0.  , 0.  ],
@@ -53,7 +56,7 @@ class MicroPhi:
                            [0.  , 0.  , 0.25, 0.5 ],
                            [0.  , 0.25, 0.  , 0.5 ],
                            [0.25, 0.5 , 0.5 , 1.  ]]])
-        elif r == 4:
+        elif r == 4: # (4, 16, 4)
             R = np.array([[[1.    , 0.75  , 0.75  , 0.5625],
                            [0.75  , 0.5   , 0.5625, 0.375 ],
                            [0.5   , 0.25  , 0.375 , 0.1875],
@@ -123,7 +126,29 @@ class MicroPhi:
                            [0.5625, 0.75  , 0.75  , 1.    ]]])
         return R
     
-    def phi_for_Kim(self, ith, k, psi, f):
+    def phi_for_Kim_L2(self, ith, k, psi, f):
+        # k, (2m+2, NXF, 2m+2, NYF)
+        # f, (4, NXF, NYF)
+        xth, yth = divmod(ith, self.nyc//2)
+        m = self.m
+        m2 = 2*m + 1
+        
+        ws = self.get_local_domain(xth, yth)
+        
+        D = np.zeros((4, 4, 4))
+        R = np.zeros((4, 2, 2))
+        F = np.zeros((4, 2))
+                
+        # The finest grid, T0
+        phiKim0, R[3], D[3], F[3] = self.phi_for_Kim_T0(ws[3], k[1:,:,1:], psi[1:,:,1:], f[3])
+        # T1 grid
+        for i in range(3):
+            xth, yth = divmod(i, 2)
+            R[i], D[i], F[i] = self.phi_for_Kim_T1(ws[i], 
+        k[xth:xth+m2,:,yth:yth+m2], psi[xth:xth+m2,:,yth:yth+m2], f[i], phiKim0)
+        return R, D, F
+    
+    def phi_for_Kim_L3(self, ith, k, psi, f):
         # k, (2m+4, NXF, 2m+4, NYF)
         # f, (16, NXF, NYF)
         xth, yth = divmod(ith, self.nyc//4)
@@ -146,7 +171,7 @@ class MicroPhi:
         # T2 grid
         for i in [1, 3, 4, 5, 6, 7, 9, 11, 12, 13, 14, 15]:
             xth, yth = divmod(i, 4)
-            R[i], D[i], F[i] = self.phi_for_Kim_T1(ws[i],
+            R[i], D[i], F[i] = self.phi_for_Kim_T2(ws[i],
         k[xth:xth+m2,:,yth:yth+m2], psi[xth:xth+m2,:,yth:yth+m2], f[i], phiKim0)
         return R, D, F
     
@@ -212,10 +237,8 @@ class MicroPhi:
         I = np.einsum('tmpnql, mpnqi, imn -> mnit', I, J, 1/J0) # (m2, m2, 2, GD)
         I = I.reshape(m2**2, 4)
         I -= I[I.shape[0]//2]
-        S[-2*m2**2:-m2**2, 2] = -I[:, 0]
-        S[-2*m2**2:-m2**2, 3] = -I[:, 1]
-        S[-m2**2:, 4] = -I[:, 2]
-        S[-m2**2:, 5] = -I[:, 3]
+        S[-2*m2**2:-m2**2, 2:4] = -I[:, :2]
+        S[-m2**2:, 4:] = -I[:, 2:]
         
         # Boudary condition
         phiKim = mesh0.set_zero_dirichlet(A, S)
@@ -230,10 +253,6 @@ class MicroPhi:
         A = mesh0.cell_stiff_matrix_varphi()
         Bs = np.einsum('lmi, lnj, mn, l -> ij', phi, phi, A, k0[m,:,m].flat)
         bs = np.einsum('lmi, l, m -> i', phi[:,:,:2], f.flat, np.full(4, mesh0.cellm*0.25))
-        
-        # I = np.max(np.abs(Bs[:2, 2:]))
-        # if I > 1e-7:
-        #     print("T0 advection coefficient is none zero in ", w0)
         return phiKim, Bs[:2,:2], Bs[2:,2:], bs
             
     def phi_for_Kim_T1(self, w1, k1, psi1, f, phiKim0):
@@ -305,26 +324,23 @@ class MicroPhi:
         I = np.einsum('mxnyrli, mxnyj, jmn -> jmni', phiKim0, J, J0) # (2, m2, m2, 6)
         S[-2*m2**2:] = I.reshape(-1, 6)
         
-        # Original part.
+        # Original part
         S[-2*m2**2:-m2**2, 0] -= 1
         S[-m2**2:, 1] -= 1
         I = np.mgrid[w1[0]:w1[1]:complex(0,m2*nx+1),
                      w1[2]:w1[3]:complex(0,m2*ny+1)] # (GD, NX+1, NY+1)
         I = I.reshape(2, -1)
         I = I[:, c2d] # (GD, NC, 4)
-        I = np.broadcast_to(I[None, :, :, :], (2,2,NC,4))
-        I = I.reshape(2, 2, m2, nx, m2, ny, 4)
+        I = I.reshape(2, m2, nx, m2, ny, 4)
         J = np.c_[np.full(NC, 0.25), np.zeros(NC)] # (NC, 2)
         J[I0, 0] = 0
         J[I0, 1] = 0.25
         J = J.reshape(m2, nx, m2, ny, 2)
-        I = np.einsum('itmpnql, mpnqi, imn -> mnit', I, J, J0) # (m2, m2, 2, GD)
+        I = np.einsum('tmpnql, mpnqi, imn -> mnit', I, J, J0) # (m2, m2, 2, GD)
         I = I.reshape(m2**2, 4)
         I -= I[I.shape[0]//2]
-        S[-2*m2**2:-m2**2, 2] -= I[:, 0]
-        S[-2*m2**2:-m2**2, 3] -= I[:, 1]
-        S[-m2**2:, 4] -= I[:, 2]
-        S[-m2**2:, 5] -= I[:, 3]
+        S[-2*m2**2:-m2**2, 2:4] -= I[:, :2]
+        S[-m2**2:, 4:] -= I[:, 2:]
 
         # Boudary condition
         phi = mesh1.set_zero_dirichlet(A, S)
@@ -345,10 +361,6 @@ class MicroPhi:
         A = mesh1.cell_stiff_matrix_varphi()
         Bs = np.einsum('lrmi, lrnj, mn, l -> ij', phi, phi, A, k1[m,:,m].flat)
         bs = np.einsum('lrmi, l, m -> i', phi[:,:,:,:2], f.flat, np.full(4, mesh1.cellm/16))
-        
-        # I = np.max(np.abs(Bs[:2, 2:]))
-        # if I > 1e-7:
-        #     print("T1 advection coefficient is none zero in ", w1)
         return Bs[:2,:2], Bs[2:,2:], bs
         
     def phi_for_Kim_T2(self, w2, k2, psi2, f, phiKim0):
@@ -419,19 +431,16 @@ class MicroPhi:
                      w2[2]:w2[3]:complex(0,m2*ny+1)] # (GD, NX+1, NY+1)
         I = I.reshape(2, -1)
         I = I[:, c2d] # (GD, NC, 4)
-        I = np.broadcast_to(I[None, :, :, :], (2,2,NC,4))
-        I = I.reshape(2, 2, m2, nx, m2, ny, 4)
+        I = I.reshape(2, m2, nx, m2, ny, 4)
         J = np.c_[np.full(NC, 0.25), np.zeros(NC)] # (NC, 2)
         J[I0, 0] = 0
         J[I0, 1] = 0.25
         J = J.reshape(m2, nx, m2, ny, 2)
-        I = np.einsum('itmpnql, mpnqi, imn -> mnit', I, J, J0) # (m2, m2, 2, GD)
+        I = np.einsum('tmpnql, mpnqi, imn -> mnit', I, J, J0) # (m2, m2, 2, GD)
         I = I.reshape(m2**2, 4)
         I -= I[I.shape[0]//2]
-        S[-2*m2**2:-m2**2, 2] -= I[:, 0]
-        S[-2*m2**2:-m2**2, 3] -= I[:, 1]
-        S[-m2**2:, 4] -= I[:, 2]
-        S[-m2**2:, 5] -= I[:, 3]
+        S[-2*m2**2:-m2**2, 2:4] -= I[:, :2]
+        S[-m2**2:, 4:] -= I[:, 2:]
                 
         # Boudary condition
         phi = mesh2.set_zero_dirichlet(A, S)
@@ -441,21 +450,19 @@ class MicroPhi:
         I = mesh2.ada(m*nx*(m2*ny+1)+m*ny, nx+1, ny+1, m2*ny+1)
         phi = phi[I] # (NN, 6)
         c2d = mesh2.cell_to_dof(nx, ny)
-        phi = phi[c2d] # (nx, ny, LDC, 6)
+        phi = phi[c2d] # (nx*ny, LDC, 6)
         phi = phi.reshape(nx, ny, 4, 6)
-        I = self.linear_intepolation_quadmesh(2) # (LDC, r*r, LDF)
+        I = self.linear_intepolation_quadmesh(4) # (LDC, r*r, LDF)
         phi = np.einsum('xyci, crf -> xyrfi', phi, I)
+        # (m2, nx, m2, ny, 16, 4, 6) -> (nx, ny, r*r, LDF, 6)
         phiKim0 = phiKim0[m, :, m] # (nx, ny, r*r, LDF, 6)
         phi = phi + phiKim0
-        phi = phi.reshape(-1, 4, 4, 6)
+        phi = phi.reshape(-1, 16, 4, 6)
         
         A = mesh2.cell_stiff_matrix_varphi()
         Bs = np.einsum('lrmi, lrnj, mn, l -> ij', phi, phi, A, k2[m,:,m].flat)
         bs = np.einsum('lrmi, l, m -> i', phi[:,:,:,:2], f.flat, np.full(4, mesh2.cellm/64))
         
-        # I = np.max(np.abs(Bs[:2, 2:]))
-        # if I > 1e10:
-        #     print("T2 advection coefficient is none zero in ", w2)
         return Bs[:2,:2], Bs[2:,2:], bs
         
     
@@ -502,29 +509,31 @@ class HierarchicalMultiHomogenization(MicroPhi):
         return ix.flatten('F')
     
     def reshape(self, a, xr, yr, I):
-        
+        # I, ()
         a = a.swapaxes(1, 2)
         a = a.reshape(-1, self.nxf, self.nyf)
         
-        a = a[I] # (xr*yr, (2M+4)^2, NXF, NYF)
-        a = a.reshape(xr*yr, 2*self.m+4, 2*self.m+4, self.nxf, self.nyf)
-        a = a.swapaxes(2, 3) # (XR*YR, 2m+4, NXF, 2m+4, NYF)
+        a = a[I] # (xr*yr, (2m+2^{L-1})^2, NXF, NYF)
+        a = a.reshape(xr*yr, 2*self.m+2**(self.L-1), 2*self.m+2**(self.L-1), self.nxf, self.nyf)
+        a = a.swapaxes(2, 3) # (XR*YR, 2m+2^{L-1}, NXF, 2m+2^{L-1}, NYF)
         return a
     
     def solve(self, ks, Psis, fs, way='m'):
+        # k, (nxc+2m, nxf, nyc+2m, nyf)
+        E = 2**(self.L-1)
+        xr = self.nxc // E
+        yr = self.nyc // E
         
-        xr = self.nxc // 4
-        yr = self.nyc // 4
+        fs = fs.reshape(xr, E, self.nxf, yr, E, self.nyf)
+        fs = fs.transpose(0, 3, 1, 4, 2, 5) # (XR, YR, 2^{L-1}, 2^{L-1}, NXF, NYF)
+        fs = fs.reshape(-1, E**2, self.nxf, self.nyf)
         
-        fs = fs.reshape(xr, 4, self.nxf, yr, 4, self.nyf)
-        fs = fs.transpose(0, 3, 1, 4, 2, 5) # (XR, YR, 4, 4, NXF, NYF)
-        fs = fs.reshape(-1, 16, self.nxf, self.nyf)
-
-        I = np.arange(xr) * 4 * (self.nyc+2*self.m)
-        I = I[:, np.newaxis] + np.arange(0, self.nyc, 4)
-        I = I.reshape(-1)        
-        J = self.ada(0, 2*self.m+4, 2*self.m+4, self.nyc+2*self.m)
-        I = I[:, np.newaxis] + J
+        I = np.arange((self.nxc+2*self.m)*(self.nyc+2*self.m))
+        I = I.reshape(self.nxc+2*self.m, self.nyc+2*self.m)
+        J = I[:2*self.m+2**(self.L-1), :2*self.m+2**(self.L-1)]
+        I = I[:self.nxc:2**(self.L-1), :self.nyc:2**(self.L-1)]
+        I = I.reshape(-1)
+        I = I[:, np.newaxis] + J.reshape(-1) # (xr*yr, (2m+2^{L-1})^2)
         
         ks = self.reshape(ks, xr, yr, I)
         Psis = self.reshape(Psis, xr, yr, I)
@@ -533,26 +542,35 @@ class HierarchicalMultiHomogenization(MicroPhi):
             pool = mp.Pool(processes=self.nc)
             local = deepcopy(self)
             args = list(zip(range(self.ncc), ks, Psis, fs))
-            res = pool.starmap(local.phi_for_Kim, args)
+            if self.L == 2:
+                res = pool.starmap(local.phi_for_Kim_L2, args)
+            elif self.L == 3:
+                res = pool.starmap(local.phi_for_Kim_L3, args)
             Rs, Ds, Fs = map(list, zip(*res))
+            Rs = np.array(Rs)
+            Ds = np.array(Ds)
+            Fs = np.array(Fs)
         else:
-            Rs = np.zeros((xr*yr, 16, 2, 2))
-            Ds = np.zeros((xr*yr, 16, 4, 4))
-            Fs = np.zeros((xr*yr, 16, 2))
+            Rs = np.zeros((xr*yr, E**2, 2, 2))
+            Ds = np.zeros((xr*yr, E**2, 4, 4))
+            Fs = np.zeros((xr*yr, E**2, 2))
             for i in range(xr*yr):
-                Rs[i], Ds[i], Fs[i] = self.phi_for_Kim(i, ks[i], Psis[i], fs[i])
+                if self.L == 2:
+                    Rs[i], Ds[i], Fs[i] = self.phi_for_Kim_L2(i, ks[i], Psis[i], fs[i])
+                elif self.L == 3:
+                    Rs[i], Ds[i], Fs[i] = self.phi_for_Kim_L3(i, ks[i], Psis[i], fs[i])
         
-        Rs = Rs.reshape(xr, yr, 4, 4, 2, 2)
+        Rs = Rs.reshape(xr, yr, E, E, 2, 2)
         Rs = Rs.swapaxes(1, 2)
         Rs = Rs.reshape(self.ncc, 2, 2)
-        Ds = Ds.reshape(xr, yr, 4, 4, 2, 2, 2, 2)
+        Ds = Ds.reshape(xr, yr, E, E, 2, 2, 2, 2)
         Ds = Ds.swapaxes(1, 2)
         Ds = Ds.reshape(self.ncc, 2, 2, 2, 2)
-        Fs = Fs.reshape(xr, yr, 4, 4, 2)
+        Fs = Fs.reshape(xr, yr, E, E, 2)
         Fs = Fs.swapaxes(1, 2)
         Fs = Fs.reshape(self.ncc, 2)
         # return Rs, Ds, Fs
         meshc = MHMacroMesh(self.Omega, self.nxc, self.nyc)
         UH, UHa = meshc.solve(Rs, Ds, Fs)
-        return UH, UHa, Rs, Ds, Fs
+        return UH, UHa
 

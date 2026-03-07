@@ -70,7 +70,7 @@ class RectangleMesh:
         return v
     
     def cell_mass_matrix_varphi(self):
-        """
+        r"""
         \int_{w} varphi_j \varphi_i
 
         Returns
@@ -86,7 +86,7 @@ class RectangleMesh:
         return Mw
     
     def cell_stiff_matrix_varphi(self):
-        """
+        r"""
         \int_{w} \nabla varphi_j \cdot \nabla \varphi_i
 
         Returns
@@ -111,13 +111,6 @@ class RectangleMesh:
         """
         
 
-        Parameters
-        ----------
-        nx : int
-            division on x axis.
-        ny : int
-            division on y axis.
-
         Returns
         -------
         ibd : ndarray
@@ -133,16 +126,6 @@ class RectangleMesh:
         
     def set_zero_dirichlet(self, A, F):
         
-        # # # print("A.det: ", np.linalg.det(A.A))
-        # if F.ndim == 1:
-        #     bdI = self.is_boundary_dof()
-        #     F[bdI] = 0
-        #     I = np.zeros(A.shape[0], dtype=np.int_)
-        #     I[bdI] = 1
-        #     Tbd = spdiags(I, 0, A.shape[0], A.shape[0])
-        #     T = spdiags(1-I, 0, A.shape[0], A.shape[0])
-        #     A = T@A@T + Tbd
-        
         bdI = self.is_boundary_dof()
         F[bdI] = 0
         I = np.zeros(A.shape[0], dtype=np.int_)
@@ -150,17 +133,17 @@ class RectangleMesh:
         Tbd = spdiags(I, 0, A.shape[0], A.shape[0])
         T = spdiags(1-I, 0, A.shape[0], A.shape[0])
         A = T@A@T + Tbd
-
+        
         x = pysolve(A, F)
         # x = scsolve(A, F)
         
-        er = np.sum(np.abs(A@x - F)> 1e-10)
-        if er > 0:
-            print(self.w, "er is ", er, np.max(np.abs(A@x - F)))
+        er = np.max(np.abs(A@x - F))
+        if er > 1e-8:
+            print(self.w, "er is ", er)
         return x
     
-    
-class MacroMesh:
+
+class MHMacroMesh:
     def __init__(self, Omega, nx, ny):
         self.Omega = Omega
         self.nx = nx
@@ -186,7 +169,7 @@ class MacroMesh:
         return v
     
     def Ki_mass_matrix(self):
-        """
+        r"""
         
 
         Returns
@@ -203,7 +186,7 @@ class MacroMesh:
         return Mw
     
     def Ki_stiff_matrix(self):
-        """
+        r"""
         \int_{w} \nabla varphi_j \varphi_i
 
         Returns
@@ -242,13 +225,6 @@ class MacroMesh:
         """
         
 
-        Parameters
-        ----------
-        nx : int
-            division on x axis.
-        ny : int
-            division on y axis.
-
         Returns
         -------
         ibd : ndarray
@@ -262,9 +238,6 @@ class MacroMesh:
         ibd[self.ny+2:-(self.ny+1):2] = ibd[self.ny+1:-(self.ny+2):2] + self.ny
         return ibd
 
-
-class MHMacroMesh(MacroMesh):
-    
     def solve(self, Rs, Ds, Fs):
         
         I = self.Ki_mass_matrix()
@@ -301,39 +274,4 @@ class MHMacroMesh(MacroMesh):
         UHa = UHa.reshape(2, self.nx, self.ny)
         UH = UH.reshape(2, self.nx+1, self.ny+1)
         return UH, UHa
-
-
-class NHMacroMesh(MacroMesh):
-    
-    def solve(self, Ds, f):
-        
-        A = self.Ki_stiff_matrix()
-        A = np.einsum('lgp, gpij -> lij', Ds, A)
-        c2d = self.cell_to_dof()
-        I = np.broadcast_to(c2d[:, :, None], A.shape)
-        J = np.broadcast_to(c2d[:, None, :], A.shape)
-        A = csr_matrix((A.flat, (I.flat,J.flat)), (self.nn,self.nn))
-        
-        f = np.einsum('l, i -> li', f.flat, np.full(4, self.cellm/4))
-        F = np.zeros(self.nn)
-        np.add.at(F, c2d, f)
-        
-        # Boundary condition
-        bdI = self.is_boundary_dof()
-        F[bdI] = 0
-        I = np.zeros(A.shape[0], dtype=np.int_)
-        I[bdI] = 1
-        Tbd = spdiags(I, 0, A.shape[0], A.shape[0])
-        T = spdiags(1-I, 0, A.shape[0], A.shape[0])
-        A = T@A@T + Tbd
-                
-        UH = scsolve(A, F)
-        # UH = pysolve(A, F)
-        
-        UHa = UH[c2d] # (NC, 4)
-        UHa = np.einsum('li, i -> l', UHa, np.full(4, 0.25))
-        UHa = UHa.reshape(self.nx, self.ny)
-        UH = UH.reshape(self.nx+1, self.ny+1)
-        return UH, UHa
-
 
